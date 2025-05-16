@@ -23,20 +23,12 @@ class SignSeq(nn.Module, PyTorchModelHubMixin):
             nn.Conv2d(1, cnn_ch, (3, 3), stride=(1, 2), padding=(1, 1)),
             nn.BatchNorm2d(cnn_ch),
             nn.GELU(),
-            nn.Conv2d(cnn_ch, d_model, (3, 3), stride=(1, 2), padding=(1, 1)),
+            nn.Conv2d(cnn_ch, d_model, (6, 3), stride=(1, 2), padding=(0, 1)),
             nn.BatchNorm2d(d_model),
             nn.GELU(),
         )
-        # Calculate the output height dimension after the CNN
-        # Input height is feature_dim (F)
-        # Stride in height is 1 for both conv layers
-        # Kernel size in height is 3 for both conv layers
-        # Padding in height is 1 for both conv layers
-        # Output height after 1st conv: floor((F + 2*1 - 3)/1) + 1 = floor(F - 1) + 1
-        # Output height after 2nd conv: floor((floor(F - 1) + 1 + 2*1 - 3)/1) + 1 = floor(F - 1) + 1
-        # For F=6, Fp = floor(6 - 1) + 1 = 5 + 1 = 6
-        # The output feature dimension Fp should be feature_dim itself with stride 1 and kernel/padding 3,1
-        Fp_out = feature_dim  # Based on calculation
+
+        Fp_out = 1
 
         # After flattening the CNN frequency dimension, project to D_model
         # The input size to proj is C * Fp_out
@@ -129,12 +121,27 @@ class SignSeq(nn.Module, PyTorchModelHubMixin):
 
 
 if __name__ == "__main__":
-    model = SignSeq()
+    from torch.profiler import profile, ProfilerActivity
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SignSeq().to(device)
     model.eval()
-    with torch.no_grad():
-        refs = torch.randn(2, 5, 4096, 6)  # (B, V, T, F)
-        control = torch.tensor(
-            [[100, 200], [150, 250]], dtype=torch.float32
+    with (
+        torch.no_grad(),
+        profile(
+            activities=(
+                [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+                if torch.cuda.is_available()
+                else [ProfilerActivity.CPU]
+            ),
+            profile_memory=True,
+            record_shapes=True,
+            with_stack=True,
+        ) as prof,
+    ):
+        refs = torch.randn(2, 5, 4096, 6).to(device)  # (B, V, T, F)
+        control = torch.tensor([[100, 200], [150, 250]], dtype=torch.float32).to(
+            device
         )  # (B, 2) [width, height]
         output = model(refs, control)
 
@@ -144,3 +151,9 @@ if __name__ == "__main__":
         print(f"Total parameters: {params:,} ")
         print(f"Input shape: {refs.shape}, Control shape: {control.shape}")
         print(f"Output shape: {output.shape}")
+
+    print(
+        prof.key_averages().table(
+            sort_by="cuda_time_total" if torch.cuda.is_available() else "cpu_time_total"
+        )
+    )
