@@ -1,12 +1,14 @@
 import io
 import json
 import math
+import random
 from pathlib import Path
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from datasets import Dataset, DatasetDict
 from PIL import Image as PilImage
+from itertools import combinations
 
 
 def calculate_stats(values: list[float]) -> tuple[float, float, float]:
@@ -301,3 +303,104 @@ def load_local_dataset() -> DatasetDict:
     dataset_dict = DatasetDict({"train": dataset})
 
     return dataset_dict
+
+
+def transform_sequence_from_discrete_to_continuous(
+    dataset: DatasetDict,
+) -> DatasetDict:
+    """
+    Transform discrete sequence data to 240Hz regularly sampled sequences using linear interpolation.
+    If the gap between points is > 1/120s, fill with zeros.
+    """
+
+    def _transform_sequence(record):
+        sequence = record["sequence"]
+        duration = record["duration"]
+        if not sequence or duration <= 0:
+            record["sequence"] = []
+            return record
+        # Output: regularly sampled at 240Hz
+        step = 1.0 / 240
+        num_steps = int(math.ceil(duration / step)) + 1
+        feature_dim = len(sequence[0])
+        new_sequence = []
+        seq_idx = 0
+        for i in range(num_steps):
+            t = i * step
+            # Find the two points in sequence that t falls between
+            while seq_idx + 1 < len(sequence) and sequence[seq_idx + 1][0] < t:
+                seq_idx += 1
+            if seq_idx + 1 < len(sequence):
+                t0, t1 = sequence[seq_idx][0], sequence[seq_idx + 1][0]
+                p0, p1 = sequence[seq_idx], sequence[seq_idx + 1]
+                if t1 - t0 > 1 / 120:
+                    # Large gap, fill with zeros
+                    new_sequence.append([0.0] * feature_dim)
+                else:
+                    # Linear interpolation
+                    alpha = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+                    interp = [
+                        p0[j] + (p1[j] - p0[j]) * alpha for j in range(feature_dim)
+                    ]
+                    new_sequence.append(interp)
+            else:
+                # After last point, fill with zeros
+                new_sequence.append([0.0] * feature_dim)
+        record["sequence"] = new_sequence
+        return record
+
+    dataset_dict = dataset.map(_transform_sequence)
+    return dataset_dict
+
+
+from itertools import combinations
+import random
+
+
+def prepare_samples(
+    dataset: Dataset,
+    num_references: int = 1,
+    max_samples_per_signer: int = 200,
+) -> Dataset:
+    """
+    Prepare pairs of reference and target sequences for training.
+    Each sample consists of N reference sequences and a target sequence from the same signer.
+    Uses all possible combinations (C(count, N+1)) for each signer, up to max_samples_per_signer, using reservoir sampling for memory efficiency.
+    """
+    # Group records by signer
+    signer_records = {}
+    for record in dataset:
+        signer = record["signer"]
+        if signer not in signer_records:
+            signer_records[signer] = []
+        signer_records[signer].append(record)
+
+    new_samples = []
+    for signer, records in signer_records.items():
+        if len(records) < num_references + 1:
+            print(f"Signer {signer} has only {len(records)} samples, skipping.")
+            continue
+        # Reservoir sampling for combinations
+        reservoir = []
+        for i, combo in enumerate(combinations(records, num_references + 1)):
+            if i < max_samples_per_signer:
+                reservoir.append(combo)
+            else:
+                j = random.randint(0, i)
+                if j < max_samples_per_signer:
+                    reservoir[j] = combo
+        for combo in reservoir:
+            ref_records = combo[:num_references]
+            target_record = combo[num_references]
+            new_samples.append(
+                {
+                    "references": [r["sequence"] for r in ref_records],
+                    "reference_widths": [r["width"] for r in ref_records],
+                    "reference_heights": [r["height"] for r in ref_records],
+                    "target": target_record["sequence"],
+                    "target_width": target_record["width"],
+                    "target_height": target_record["height"],
+                    "signer": signer,
+                }
+            )
+    return Dataset.from_list(new_samples)
