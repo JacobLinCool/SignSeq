@@ -2,13 +2,17 @@ import io
 import json
 import math
 import random
+from collections import defaultdict
+from itertools import combinations
 from pathlib import Path
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from PIL import Image as PilImage
-from itertools import combinations
+from torch.utils.data import Sampler
+from torch.utils.data.dataloader import default_collate
 
 
 def calculate_stats(values: list[float]) -> tuple[float, float, float]:
@@ -418,3 +422,105 @@ def load_default_dataset() -> DatasetDict:
     - signer (string): The identifier for the signer (same for references and target in a sample).
     """
     return load_dataset("JacobLinCool/SignSeq-dataset-1x16")
+
+
+class VariableVBatchSampler(Sampler):
+    """
+    A batch sampler that groups samples by the number of references (V)
+    and ensures each batch contains samples with the same V.
+    It also handles shuffling of V-groups and samples within V-groups.
+    """
+
+    def __init__(
+        self, dataset, batch_size: int, shuffle: bool = True, drop_last: bool = False
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+
+        self.v_groups = self._group_by_v()
+        self.v_keys = list(self.v_groups.keys())
+
+        self.num_batches = 0
+        for v_key in self.v_keys:
+            indices_for_v = self.v_groups[v_key]
+            if self.drop_last:
+                self.num_batches += len(indices_for_v) // self.batch_size
+            else:
+                self.num_batches += math.ceil(len(indices_for_v) / self.batch_size)
+
+    def _group_by_v(self):
+        v_groups = defaultdict(list)
+        for i in range(len(self.dataset)):
+            sample = self.dataset[i]
+            # V is the number of reference sequences
+            v_value = len(sample["references"])
+            v_groups[v_value].append(i)
+        return v_groups
+
+    def __iter__(self):
+        all_batches = []
+
+        v_keys_iter = list(self.v_keys)
+        if self.shuffle:
+            random.shuffle(v_keys_iter)
+
+        for v_val in v_keys_iter:
+            indices_for_v = list(self.v_groups[v_val])
+            if self.shuffle:
+                random.shuffle(indices_for_v)
+
+            for i in range(0, len(indices_for_v), self.batch_size):
+                batch_indices = indices_for_v[i : i + self.batch_size]
+                if len(batch_indices) < self.batch_size and self.drop_last:
+                    continue
+                all_batches.append(batch_indices)
+
+        if (
+            self.shuffle
+        ):  # Shuffle the order of all generated batches from different V-groups
+            random.shuffle(all_batches)
+
+        return iter(all_batches)
+
+    def __len__(self):
+        return self.num_batches
+
+
+def collate_signseq(batch_list):
+    """
+    Custom collate function for SignSeq data.
+    Assumes all samples in batch_list have the same V (number of references),
+    ensured by VariableVBatchSampler.
+    Constructs 'ref_controls' and 'control' tensors.
+    """
+    # Pop non-tensor items or items that default_collate might struggle with if they were variable.
+    # 'signer' is a list of strings, handle separately.
+    signers = [s.pop("signer") for s in batch_list if "signer" in s]
+
+    # Use default_collate for the rest of the tensor features
+    # (e.g., 'references', 'reference_widths', 'reference_heights', 'target', 'target_width', 'target_height')
+    collated_batch = default_collate(batch_list)
+
+    # Restore signers if they were present
+    if signers:
+        collated_batch["signer"] = signers
+
+    # Construct 'ref_controls' and 'control' which are expected by the model
+    # Ensure the keys exist from the dataset features
+    if "reference_widths" in collated_batch and "reference_heights" in collated_batch:
+        ref_widths = collated_batch["reference_widths"]
+        ref_heights = collated_batch["reference_heights"]
+        collated_batch["ref_controls"] = torch.stack((ref_widths, ref_heights), dim=-1)
+
+    if "target_width" in collated_batch and "target_height" in collated_batch:
+        target_width = collated_batch["target_width"]
+        target_height = collated_batch["target_height"]
+        collated_batch["control"] = torch.stack((target_width, target_height), dim=-1)
+
+    # Rename 'references' from dataset to 'refs' for the model input
+    if "references" in collated_batch:
+        collated_batch["refs"] = collated_batch.pop("references")
+
+    return collated_batch
