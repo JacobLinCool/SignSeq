@@ -3,7 +3,7 @@ name = "signseq"
 version = "0.1.0"
 description = "Signature Sequence Generation."
 authors = [{ name = "Jacob Lin", email = "jacoblincool@gmail.com" }]
-dependencies = ["torch", "torchaudio", "datasets", "accelerate"]
+dependencies = ["torch", "torchaudio", "datasets", "accelerate", "hf_xet", "tensorboard"]
 readme = "README.md"
 requires-python = ">=3.10"
 
@@ -11,5 +11,5 @@ requires-python = ">=3.10"
 develop = ["pytest", "black", "isort"]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, load_dataset
 from PIL import Image as PilImage
 from itertools import combinations
 
@@ -353,10 +353,6 @@ def transform_sequence_from_discrete_to_continuous(
     return dataset_dict
 
 
-from itertools import combinations
-import random
-
-
 def prepare_samples(
     dataset: Dataset,
     num_references: int = 1,
@@ -404,3 +400,21 @@ def prepare_samples(
                 }
             )
     return Dataset.from_list(new_samples)
+
+
+def load_default_dataset() -> DatasetDict:
+    """
+    ## Splits
+    - train: ~18.6k samples (6 signer)
+    - test: ~3.2k samples (1 signer)
+    ## Features
+    - references (list of list of list of float): A list of N reference sequences from the same signer.
+      Each reference sequence is processed (time removed, padded/truncated). shape: (V=1~16, T=4096, F=6)
+    - reference_widths (list of float): A list of widths corresponding to each reference sequence. shape: (V=1~16)
+    - reference_heights (list of float): A list of heights corresponding to each reference sequence. shape: (V=1~16)
+    - target (list of list of float): The target sequence from the same signer, processed similarly to references. shape: (T=4096, F=6)
+    - target_width (float): The width corresponding to the target sequence.
+    - target_height (float): The height corresponding to the target sequence.
+    - signer (string): The identifier for the signer (same for references and target in a sample).
+    """
+    return load_dataset("JacobLinCool/SignSeq-dataset-1x16")
